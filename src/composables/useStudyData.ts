@@ -1,4 +1,5 @@
 import { computed, ref, watch } from 'vue'
+import { addDays, calculateNextInterval, isDue } from '../utils/srs'
 
 export interface WordItem {
   id: string
@@ -10,9 +11,13 @@ export interface WordItem {
   mastered: boolean
   wrongCount: number
   createdAt: string
+  lastReviewedAt?: string
+  nextReviewAt?: string
 }
 
-const STORAGE_KEY = 'study-english-words-v1'
+const STORAGE_KEY = 'study-english-words-v2'
+
+const nowIso = () => new Date().toISOString()
 
 const seed: WordItem[] = [
   {
@@ -24,7 +29,8 @@ const seed: WordItem[] = [
     level: 'medium',
     mastered: false,
     wrongCount: 0,
-    createdAt: new Date().toISOString()
+    createdAt: nowIso(),
+    nextReviewAt: addDays(new Date(), 2).toISOString()
   },
   {
     id: 'w2',
@@ -34,8 +40,9 @@ const seed: WordItem[] = [
     example: 'He keeps meticulous study notes.',
     level: 'hard',
     mastered: false,
-    wrongCount: 0,
-    createdAt: new Date().toISOString()
+    wrongCount: 2,
+    createdAt: nowIso(),
+    nextReviewAt: addDays(new Date(), 1).toISOString()
   },
   {
     id: 'w3',
@@ -45,17 +52,24 @@ const seed: WordItem[] = [
     example: 'Try to expand your vocabulary every day.',
     level: 'easy',
     mastered: true,
-    wrongCount: 1,
-    createdAt: new Date().toISOString()
+    wrongCount: 0,
+    createdAt: nowIso(),
+    nextReviewAt: addDays(new Date(), 5).toISOString()
   }
 ]
+
+const normalizeWord = (item: WordItem): WordItem => ({
+  ...item,
+  nextReviewAt: item.nextReviewAt ?? addDays(new Date(), 1).toISOString()
+})
 
 const safeParse = () => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return seed
     const parsed = JSON.parse(raw) as WordItem[]
-    return Array.isArray(parsed) ? parsed : seed
+    if (!Array.isArray(parsed)) return seed
+    return parsed.map(normalizeWord)
   } catch {
     return seed
   }
@@ -79,12 +93,19 @@ export const useStudyData = () => {
     return Math.round((masteredCount.value / totalCount.value) * 100)
   })
 
-  const addWord = (payload: Omit<WordItem, 'id' | 'createdAt' | 'wrongCount'>) => {
+  const dueWords = computed(() =>
+    words.value.filter((item) => (item.nextReviewAt ? isDue(item.nextReviewAt) : false))
+  )
+
+  const addWord = (
+    payload: Omit<WordItem, 'id' | 'createdAt' | 'wrongCount' | 'nextReviewAt'>
+  ) => {
     words.value.unshift({
       ...payload,
       id: crypto.randomUUID(),
-      createdAt: new Date().toISOString(),
-      wrongCount: 0
+      createdAt: nowIso(),
+      wrongCount: 0,
+      nextReviewAt: addDays(new Date(), 1).toISOString()
     })
   }
 
@@ -93,12 +114,30 @@ export const useStudyData = () => {
     if (idx >= 0) words.value[idx] = { ...words.value[idx], ...patch }
   }
 
+  const recordPracticeResult = (id: string, isCorrect: boolean) => {
+    const idx = words.value.findIndex((w) => w.id === id)
+    if (idx < 0) return
+
+    const current = words.value[idx]
+    const wrongCount = isCorrect ? Math.max(0, current.wrongCount - 1) : current.wrongCount + 1
+    const mastered = isCorrect && wrongCount === 0
+    const interval = calculateNextInterval(wrongCount, mastered)
+
+    words.value[idx] = {
+      ...current,
+      wrongCount,
+      mastered,
+      lastReviewedAt: nowIso(),
+      nextReviewAt: addDays(new Date(), interval).toISOString()
+    }
+  }
+
   const removeWord = (id: string) => {
     words.value = words.value.filter((w) => w.id !== id)
   }
 
   const importWords = (list: WordItem[]) => {
-    words.value = list
+    words.value = list.map(normalizeWord)
   }
 
   const resetSeed = () => {
@@ -107,11 +146,13 @@ export const useStudyData = () => {
 
   return {
     words,
+    dueWords,
     masteredCount,
     totalCount,
     progress,
     addWord,
     updateWord,
+    recordPracticeResult,
     removeWord,
     importWords,
     resetSeed
